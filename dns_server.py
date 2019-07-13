@@ -8,12 +8,6 @@ SERVER_PORT = 53
 DNS_MESSAGE_LENGTH = 512
 FORWARD_DNS_SERVER = ("10.3.9.5", 53)
 
-OP_CODE = {
-    0: "QUERY",
-    1: "IQUERY",
-    2: "STATUS"
-}
-
 
 class DNSBuffer:
     def __init__(self, dns_message=b''):
@@ -160,10 +154,12 @@ def read_relay(relay_file):
     return relay
 
 
+# 转发关系映射表和循环ID计数
 forward_list = {}
 current_id = 0
 
 
+# 循环生成0~65535的ID
 def generate_id():
     global current_id
     new_id = current_id
@@ -171,6 +167,7 @@ def generate_id():
     return new_id
 
 
+# 记录并替换请求包的ID，然后向远端服务器转发查询请求
 def forward_query(dm, addr):
     new_id = generate_id()
     forward_list[new_id] = (addr, dm.Header.ID)
@@ -179,14 +176,17 @@ def forward_query(dm, addr):
     answer = header + question
     sock.sendto(answer, FORWARD_DNS_SERVER)
 
-
+# 将远端服务器的响应替换回原ID，并发回原请求者
 def forward_response(dns_message, ID, addr):
     response = struct.pack("!H", ID) + dns_message[2:]
     sock.sendto(response, addr)
 
 
-def instant_response(dm, ip, addr):
-    header = DNSHeader(dm.Header.ID, 34176, 1, 1, 0, 0).build()
+# 从映射表中获取响应信息并返回
+def instant_response(dm, ip, addr, is_NULL=False):
+    # Flags最后4位(rcode)为3
+    flag = (34179 if is_NULL else 34176)
+    header = DNSHeader(dm.Header.ID, flag, 1, 1, 0, 0).build()
     question = dm.Question[0].build()
     answer = DNSResource.build(ip)
     response = header + question + answer
@@ -204,12 +204,14 @@ if __name__ == '__main__':
     sock.bind((SERVER_IP, SERVER_PORT))
 
     while True:
+        # 接收并解析DNS Message
         dns_message, addr = sock.recvfrom(DNS_MESSAGE_LENGTH)
         dm = DNSMessage.from_bytes(dns_message)
+        '''
         print(dm.Question[0].QNAME)
         print(dm.Question[0].QTYPE)
         print(dm.Question[0].QCLASS)
-
+        '''
         qr = dm.Header.QR
         # query
         if qr == 0:
@@ -217,10 +219,16 @@ if __name__ == '__main__':
             op = dm.Header.Opcode
             # standard query (QUERY)
             if op == 0:
+                # 原始映射表中存在查询的域名
                 if dm.Question[0].QNAME in book:
-                    instant_response(dm, book[dm.Question[0].QNAME], addr)
+                    ip = book[dm.Question[0].QNAME]
+                    # 如果文件中域名对应IP为"0.0.0.0"，则Flags最后4位(rcode)为3
+                    is_NULL = ip == "0.0.0.0"
+                    instant_response(dm, book[dm.Question[0].QNAME], addr, is_NULL)
+                # 不存在，向远端服务器转发
                 else:
                     forward_query(dm, addr)
+            # 除了基本查询之外的OPCODE暂未做处理
             # inverse query (IQUERY)
             elif op == 1:
                 pass
@@ -237,7 +245,6 @@ if __name__ == '__main__':
                 addr, ID = forward_list[dm.Header.ID]
                 forward_list.pop(dm.Header.ID)
                 forward_response(dns_message, ID, addr)
-            pass
 
-        print("-----------")
+        #print("-----------")
 
